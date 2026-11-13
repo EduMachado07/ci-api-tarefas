@@ -36,9 +36,9 @@ export class TaskService {
   /** Regra de negócio: não pode haver duas tarefas em aberto com o mesmo título. */
   private async assertNoOpenTaskWithTitle(title: string, ignoreId?: number): Promise<void> {
     const openTasks = await this.repository.list({ done: false });
-    const normalized = title.trim().toLowerCase();
+    const normalized = title.trim();
     const duplicate = openTasks.some(
-      (task) => task.id !== ignoreId && task.title.trim().toLowerCase() === normalized,
+      (task) => task.id !== ignoreId && task.title.trim() === normalized,
     );
     if (duplicate) {
       throw new ConflictError(`Já existe uma tarefa em aberto com o título "${title}"`);
