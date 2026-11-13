@@ -3,10 +3,10 @@ export interface Config {
   databaseUrl: string;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv=process.env): Config{
   const databaseUrl = env.DATABASE_URL;
   if (!databaseUrl) {
-    throw new Error('Variável de ambiente DATABASE_URL não definida');
+    throw new Error("Variável de ambiente DATABASE_URL não definida")
   }
 
   const port = Number(env.PORT ?? 3000);
