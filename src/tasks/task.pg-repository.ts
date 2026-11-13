@@ -28,7 +28,7 @@ export class PgTaskRepository implements TaskRepository {
 
   async list(filter: TaskFilter): Promise<Task[]> {
     const { rows } = await this.pool.query<TaskRow>(
-      `SELECT ${COLUMNS} FROM tasks WHERE ($1::boolean IS NULL OR done = $1) ORDER BY id`,
+      `SELECT ${COLUMNS} FROM tasks WHERE ($1::boolean IS NULL OR done = $1) ORDER BY ordem`,
       [filter.done ?? null],
     );
     return rows.map(toTask);
