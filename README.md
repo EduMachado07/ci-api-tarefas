@@ -45,3 +45,19 @@ npm run dev                                   # API em http://localhost:3000
 docker build -t ci-api-tarefas .
 docker run --rm -p 3000:3000 -e DATABASE_URL=postgresql://app:app@host:5432/tarefas ci-api-tarefas
 ```
+
+## Integração Contínua (GitHub Actions)
+
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo **Pull Request**
+com destino à `main`. Os jobs são encadeados com `needs`: se um falha, os seguintes são ignorados.
+
+| #   | Job                              | O que executa                                                          |
+| --- | -------------------------------- | ---------------------------------------------------------------------- |
+| 1   | Análise estática e de formatação | Prettier (`--check`), ESLint e `tsc --noEmit`                          |
+| 2   | Análise estática de segurança    | `npm audit` (dependências) e CodeQL (SAST), reprova em severidade alta |
+| 3   | Build                            | `tsc` gerando `dist/`                                                  |
+| 4   | Testes unitários                 | Vitest com cobertura (limite mínimo configurado)                       |
+| 5   | Testes de integração             | Vitest contra um PostgreSQL 16 real (service container)                |
+| 6   | Criação da imagem Docker         | Build do Dockerfile, teste de fumaça em `/health` e artefato           |
+
+A imagem **não é publicada** no PR; a publicação ficaria a cargo de um workflow de CD após o merge.

@@ -1,0 +1,261 @@
+name: CI
+
+# Gatilho: Pull Request com destino à branch main
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+# Menor privilégio por padrão; jobs que precisam de mais declaram o seu próprio bloco.
+permissions:
+  contents: read
+
+# Um novo commit no mesmo PR cancela a execução anterior.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  IMAGE_NAME: ci-api-tarefas
+
+jobs:
+  # 1. Análise estática de código + análise de formatação
+  quality:
+    name: 1. Análise estática e de formatação
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Formatação (Prettier)
+        run: npm run format:check
+
+      - name: Análise estática (ESLint)
+        run: npm run lint
+
+      - name: Checagem de tipos (TypeScript)
+        run: npm run typecheck
+
+  # 2. Análise estática de segurança (SAST) e auditoria de dependências
+  security:
+    name: 2. Análise estática de segurança
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Auditoria de dependências (npm audit)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Inicializar CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          queries: security-extended
+
+      - name: Analisar com CodeQL
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: '/language:javascript-typescript'
+          output: sarif-results
+
+      - name: Reprovar se houver alertas de severidade alta
+        run: |
+          total=$(jq -s '[.[].runs[].results[]? | select(.level == "error")] | length' sarif-results/*.sarif)
+          echo "Alertas de severidade alta encontrados pelo CodeQL: $total"
+          {
+            echo "### Análise de segurança (CodeQL)"
+            echo
+            echo "Alertas de severidade alta: **$total**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$total" -eq 0
+
+  # 3. Build
+  build:
+    name: 3. Build
+    needs: security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Build da aplicação (tsc)
+        run: npm run build
+
+  # 4. Testes unitários (sem banco de dados)
+  unit:
+    name: 4. Testes unitários
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Executar testes unitários com cobertura
+        run: npm run test:unit
+
+      - name: Resumo de cobertura
+        if: always()
+        run: |
+          test -f coverage/coverage-summary.json || exit 0
+          node -e "
+            const fs = require('node:fs');
+            const total = JSON.parse(fs.readFileSync('coverage/coverage-summary.json', 'utf8')).total;
+            console.log('### Cobertura dos testes unitários\n');
+            console.log('| Métrica | Cobertura | Itens |');
+            console.log('|---|---|---|');
+            for (const key of ['statements', 'branches', 'functions', 'lines']) {
+              const m = total[key];
+              console.log('| ' + key + ' | ' + m.pct + '% | ' + m.covered + '/' + m.total + ' |');
+            }
+          " >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: cobertura-testes-unitarios
+          path: coverage/
+          retention-days: 7
+
+  # 5. Testes de integração (API REST + PostgreSQL real)
+  integration:
+    name: 5. Testes de integração
+    needs: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: app_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d app_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://test:test@localhost:5432/app_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Aplicar migrations no banco de teste
+        run: npm run db:migrate
+
+      - name: Executar testes de integração
+        run: npm run test:integration
+
+  # 6. Criação da imagem Docker (sem publicar) + teste de fumaça
+  image:
+    name: 6. Criação da imagem Docker
+    needs: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE_TAG: ci-api-tarefas:pr-${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build da imagem (sem publicar)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test do container
+        run: |
+          docker run -d --name app -p 3000:3000 \
+            -e DATABASE_URL=postgresql://app:app@localhost:5432/app \
+            "$IMAGE_TAG"
+          curl --fail --retry 10 --retry-delay 3 --retry-connection-refused \
+            http://localhost:3000/health
+
+      - name: Logs do container (em caso de falha)
+        if: failure()
+        run: docker logs app || true
+
+      - name: Resumo da imagem
+        run: |
+          docker image ls "$IMAGE_NAME"
+          size=$(docker image inspect "$IMAGE_TAG" --format '{{.Size}}')
+          {
+            echo "### Imagem Docker criada"
+            echo
+            echo "- Tag: \`$IMAGE_TAG\`"
+            echo "- Tamanho: $((size / 1024 / 1024)) MB"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exportar imagem
+        run: docker save "$IMAGE_TAG" | gzip > imagem-docker.tar.gz
+
+      - name: Publicar imagem como artefato
+        uses: actions/upload-artifact@v6
+        with:
+          name: imagem-docker
+          path: imagem-docker.tar.gz
+          retention-days: 3
